@@ -10,46 +10,47 @@ const IAsk = readline.createInterface({
 });
 
 var running = false;
-var credentials = undefined;
-const result = {
-    ban: undefined,
-    select: undefined
+
+const animatedTitle = async(title: string)=> {
+    const chars = title.split('');
+    process.title = '';
+
+    chars.forEach((char, index)=> {
+        setTimeout(()=> {
+            process.title += char;
+            if(index+1 >= chars.length) return animatedTitle(title);
+        }, 125 * index)
+    })
 }
 
-const selectChampion = async(champion: any)=> {
-    const api = new ClientAPI();
+animatedTitle(`AUTOSELECT LOL @ryannospherys `);
+console.log(`\x1b[36mWaiting to start League Client\n`); 
 
+const selectChampion = async(credentials: ICredentials, champion: any)=> {
+    const api = new ClientAPI(credentials);
     const session = await api.getChampionSelectSession();
     if(!session) return;
+
     const localCellId = session.localPlayerCellId;
+    return session.actions.forEach(async(actions: any)=> {
+        const action = actions.filter((action: any)=> action.actorCellId === localCellId)[0]
+        if(!action) return;
 
-    session.actions.forEach(async(_session)=> {
-        _session.forEach(async(action: any)=> {
-            if (action.actorCellId != localCellId) return; 
-            const actionId = action.id;
-
-            return await api.lockChampion(champion.itemId, actionId);
-        });
-    });
+        return await api.selectChampion(champion.itemId, action.id);
+    })
 }
 
-const run = async()=> {
+const run = async(credentials: ICredentials, champions: any)=> {
     if(!running) return;
-
-    const api = new ClientAPI();
+    const api = new ClientAPI(credentials);
 
     const phases = {
         "ChampSelect": async()=> {
             const session = await api.getChampionSelectSession();
             if(!session) return;
 
-            if(session.timer.phase.includes("PLAINING")) {
-                await new Promise((resolve)=> setTimeout(()=> resolve, 1000));
-                return await selectChampion(result.select)
-            }
-
-            const banActions = session.actions[0].filter((action: any)=> action.type === 'ban' && action.completed);
-            return banActions.length < session.bans.numBans ? await selectChampion(result.ban) : await selectChampion(result.select);
+            const selectTurn = session.actions[0][0].completed
+            return selectTurn ? await selectChampion(credentials, champions.select) : await selectChampion(credentials, champions.ban)
         }
     }
 
@@ -57,38 +58,49 @@ const run = async()=> {
     return phases[phase] ? phases[phase]() : undefined;
 }
 
-const start = async()=> {
-    const client = new ClientAPI();
-    const store = new StoreAPI(await client.getRsoAuth(), await client.getStoreUrl());
+const askBanAndSelect = async(credentials: ICredentials)=> {
+    const client = new ClientAPI(credentials);
 
-    const champions: any = await store.getChampions().catch(()=> undefined);
-    if(!champions) return await start();
-    
-    console.log(`\nAvailable champions:\n`)
-    champions.catalog.forEach((champion: any)=> console.log(`${champion.name}`));
+    const rso = await client.getRsoAuth();
+    const storeUrl = await client.getStoreUrl();
 
-    const bannedChampion = await ask(`\nInput champion name (BAN)`);
-    const championToBan = champions.catalog.filter((_champion)=> _champion.name.toLowerCase().includes(String(bannedChampion).toLowerCase()))[0];
-    if(!championToBan) return console.log(`Not founded this champion to ban. Restart program`);
-    result.ban = championToBan;
+    const store = new StoreAPI(rso, storeUrl);
+    const champions = await store.getChampions();
+    champions.catalog.forEach((champion)=> console.log(champion.name))
 
-    const selectedChampion = await ask(`Input champion name (LOCK)`);
-    const championToPick =  champions.catalog.filter((_champion)=> _champion.name.toLowerCase().includes(String(selectedChampion).toLowerCase()))[0];
-    if(!championToPick) return console.log(`Not founded this champion to lock. Restart program`);
-    result.select = championToPick;
+    const ban = await ask(`\nInput champion name (to ban)`).then(async(champion)=> {
+        const championToBan = champions.catalog.filter((_champion)=> _champion.name.toLowerCase().includes(String(champion).toLowerCase()))[0];
+        if(!championToBan) {
+            console.log(`Champion not found, input correct name`);
+            return await askBanAndSelect(credentials);
+        }
 
-    console.log('\nSelected champions, waiting join to champion select.');
-    running = true;
-    setInterval(async()=> await run(), 1000);
+        return championToBan;
+    });
+
+    const select = await ask(`Input champion name (to select)`).then(async(champion)=> {
+        const championToSelect = champions.catalog.filter((_champion)=> _champion.name.toLowerCase().includes(String(champion).toLowerCase()))[0];
+        if(!championToSelect) {
+            console.log(`Champion not found, input correct name`);
+            return await askBanAndSelect(credentials);
+        }
+
+        return championToSelect;
+    });
+
+    console.log(`Champions selected, waiting join in champion select. `);
+    return { ban, select };
 }
 
 const ask = async(question: string) => new Promise((resolve)=> 
     IAsk.question(`${question}: `, (answer: string)=> resolve(answer))
 );
 
-connector.on('connect', async(_credentials: ICredentials)=> {
-    credentials = _credentials;
-    await start();
+connector.on('connect', async(credentials: ICredentials)=> {
+    console.log('League Client started.')
+    running = true;
+    const champions = await askBanAndSelect(credentials);
+    setInterval(async()=> await run(credentials, champions), 2000);
 });
 
 connector.on('disconnect', ()=> running = false);
@@ -99,7 +111,7 @@ class ClientAPI {
 
     private api: AxiosInstance;
 
-    constructor() {
+    constructor(credentials: ICredentials) {
         const agent = new https.Agent({
             rejectUnauthorized: false,
         });
@@ -136,7 +148,7 @@ class ClientAPI {
         .catch((error)=> console.log(`[ERROR] » ${error}`));
     }
 
-    public async lockChampion(championId: number, id:number) {
+    public async selectChampion(championId: number, id:number) {
         return await this.api.patch(`lol-champ-select/v1/session/actions/${id}`, { championId, "completed": true})
         .catch(()=> undefined);
     } 
@@ -162,21 +174,6 @@ class StoreAPI {
         .catch((error)=> console.log(`[ERROR] » ${error.response.data.message}`));
     }
 }
-
-const animatedTitle = async(title: string)=> {
-    const chars = title.split('');
-    process.title = '';
-
-    chars.forEach((char, index)=> {
-        setTimeout(()=> {
-            process.title += char;
-            if(index+1 >= chars.length) return animatedTitle(title);
-        }, 125 * index)
-    })
-}
-
-animatedTitle(`INSTASELECT LOL @ryannospherys `);
-console.log(`\x1b[36mWaiting to start League Client\n`);
 
 interface ICredentials {
     address: string;
